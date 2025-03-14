@@ -42,93 +42,110 @@ if torch.cuda.is_available():
 # 1. Loading MNIST Dataset
 ###
 
-
 full_mnist_dataset = load_dataset("mnist")
+
+transform = transforms.ToTensor()
+train_images = torch.stack([transform(img) for img in full_mnist_dataset["train"]["image"]])
+test_images = torch.stack([transform(img) for img in full_mnist_dataset["test"]["image"]])
+
 train_labels = torch.tensor(full_mnist_dataset["train"]["label"])
 test_labels = torch.tensor(full_mnist_dataset["test"]["label"])
+
+all_images = torch.cat((train_images, test_images))
 all_labels = torch.cat((train_labels, test_labels))
 
 
 ###
 # 2. Function to Create Imbalancing
 ###
-#(here I could think of another way on how to imbalance the dataset. My idea was to make a simpler version
-# so it is easier to understand changes in the bound)
 
-def imbalance_dataset(train_labels, keep_ratio=1.0, num_remove=2, seed=42):
+
+def imbalance_dataset(train_labels, train_images, keep_ratio=0.5, seed=None):
     """
-    Creating imbalanced dataset by randomly removing digets
+    Creates an imbalanced dataset by randomly reducing occurrences of certain classes
+    based on a sampled probability distribution.
 
     Args:
-        train_labels (torch.Tensor): Original dataset labels
-        keep_ratio (float): Fraction of selected digits to keep
-        num_remove (int): Number of different digits to reduce
-        seed (int): Set seed for reproducibility
+        train_labels (torch.Tensor): Original dataset labels.
+        train_images (torch.Tensor): Corresponding images.
+        keep_ratio (float): Fraction of samples to retain per class (1.0 = fully balanced, 0.1 = highly imbalanced).
+        seed (int): Set seed for reproducibility.
 
     Returns:
-        torch.Tensor: Modified training labels with imbalance
-        list: Digits that were randomly selected for reduction
-        torch.Tensor: Selected indices to filter images later
+        torch.Tensor: Modified training images with imbalance.
+        torch.Tensor: Modified training labels with imbalance.
+        torch.Tensor: Selected indices that were kept.
     """
     if seed is not None:
-        random.seed(SEED)
         np.random.seed(seed)
-        torch.manual_seed(seed) 
+        torch.manual_seed(seed)
+        random.seed(seed)
 
-    balanced_indices = []
+    num_classes = len(torch.unique(train_labels))  
     
-    all_digits = list(range(10))
-    reduce_digits = np.random.choice(all_digits, num_remove, replace=False).tolist()
-
-    for digit in all_digits:
-        digit_indices = torch.where(train_labels == digit)[0]
-        
-        if digit in reduce_digits:
-            num_to_keep = int(len(digit_indices) * keep_ratio)
-            shuffled_indices = digit_indices[torch.randperm(len(digit_indices))]
-            digit_indices = shuffled_indices[:num_to_keep]
-        balanced_indices.append(digit_indices)
    
-    new_indices = torch.cat(balanced_indices)
+    class_keep_probs = (torch.rand(num_classes) * (1 - keep_ratio) + keep_ratio).clamp(min=0.01)
 
-    imbalanced_labels = train_labels[new_indices]
+    
+    selected_indices = []
+    
+    for digit in range(num_classes):
+        digit_indices = torch.where(train_labels == digit)[0]  
+        keep_prob = class_keep_probs[digit].item()  
 
-    return imbalanced_labels, reduce_digits, new_indices
+        
+        keep_mask = torch.rand(len(digit_indices)) < keep_prob
+        selected_indices.append(digit_indices[keep_mask]) 
+
+   
+    selected_indices = torch.cat(selected_indices)
+    
+   
+    selected_indices = selected_indices[torch.randperm(len(selected_indices))]
+
+   
+    imbalanced_images = train_images[selected_indices]
+    imbalanced_labels = train_labels[selected_indices]
+
+    return imbalanced_images, imbalanced_labels, selected_indices
 
 ###
 # 3. Generate Imbalanced Datasets
 ###
 
 # Define imbalance levels
-imbalance_levels = [1.0, 0.9, 0.7, 0.4, 0.1, 0]  
-num_remove_digits = 3
+imbalance_levels = [1.0, 0.9, 0.7, 0.4, 0.1]  
 
-dataset_info = {} 
+dataset_info = {}
 
 for keep_ratio in imbalance_levels:
     experiment_dir = os.path.join(save_dir, f"experiment_keep_ratio_{keep_ratio}")
     os.makedirs(experiment_dir, exist_ok=True)
 
-    imbalanced_labels, removed_digits, selected_indices = imbalance_dataset(
-        train_labels, keep_ratio, num_remove=num_remove_digits, seed=42
+    
+    imbalanced_images, imbalanced_labels, selected_indices = imbalance_dataset(
+        train_labels, train_images, keep_ratio, seed=42
     )
+    
     
     unique, counts = np.unique(imbalanced_labels.numpy(), return_counts=True)
     class_distribution = dict(zip(unique.tolist(), counts.tolist()))
 
+    
     dataset_info[f"keep_ratio_{keep_ratio}"] = {
         "total_samples": len(imbalanced_labels),
-        "removed_digits": removed_digits,
         "class_distribution": class_distribution
     }
 
+    
     torch.save(imbalanced_labels, os.path.join(experiment_dir, "train_labels.pth"))
     torch.save(selected_indices, os.path.join(experiment_dir, "train_indices.pth"))
+
 
 with open(os.path.join(save_dir, "dataset_info.json"), "w") as f:
     json.dump(dataset_info, f, indent=4)
 
-print("Saved imbalanced datasets")
+
 
 ###
 # 4. Converting MNIST Images to Tensors
